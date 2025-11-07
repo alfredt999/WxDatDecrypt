@@ -104,22 +104,29 @@ class Api:
 
     def get_images_in_folder(self, folder_path):
         """
-        获取指定文件夹中所有 .dat 文件的相对路径列表。
+        获取指定文件夹及其子文件夹中所有图片文件的相对路径列表（递归）。
+        包括 .dat 文件和常见图片格式 (.jpg, .jpeg, .png, .gif, .bmp, .webp)
         """
         if not self.root_dir or not folder_path.startswith(self.root_dir):
             return []
 
+        # 支持的图片扩展名
+        IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.dat'}
+        
         relative_paths = []
+        total_files = 0
         try:
-            for item in os.listdir(folder_path):
-                full_path = os.path.join(folder_path, item)
-                # 跳过文件夹
-                if os.path.isdir(full_path):
-                    continue
-                    
-                if item.lower().endswith(DAT_FILE_EXTENSION) or self._is_valid_sns_filename(item):
-                    relative_path = os.path.relpath(full_path, self.root_dir)
-                    relative_paths.append(relative_path)
+            # 使用 os.walk 递归遍历所有子文件夹
+            for dirpath, dirnames, filenames in os.walk(folder_path):
+                for filename in filenames:
+                    total_files += 1
+                    file_ext = os.path.splitext(filename)[1].lower()
+                    # 包含 .dat 文件和常见图片格式，或者 SNS 缓存命名
+                    if file_ext in IMAGE_EXTENSIONS or self._is_valid_sns_filename(filename):
+                        full_path = os.path.join(dirpath, filename)
+                        relative_path = os.path.relpath(full_path, self.root_dir)
+                        relative_paths.append(relative_path)
+            print(f"[DEBUG] get_images_in_folder: 扫描了 {total_files} 个文件，找到 {len(relative_paths)} 个图片文件")
         except OSError as e:
             print(f"读取目录 {folder_path} 错误: {e}")
 
@@ -188,6 +195,109 @@ class Api:
             data = wxam.wxam_to_image(data)
     
         return base64.b64encode(data).decode("utf-8")
+
+    def open_export_dialog(self):
+        """
+        打开导出目标文件夹对话框，返回选择的路径。
+        """
+        result = window.create_file_dialog(webview.FileDialog.FOLDER)  # type: ignore
+        if result:
+            path = result[0]
+            return {"success": True, "path": path}
+        return {"success": False}
+
+    def export_all_images(self, export_dir: str, image_paths: list):
+        """
+        导出指定的图片列表到目标文件夹。
+        image_paths: 相对路径列表
+        """
+        if not self.root_dir:
+            return {"success": False, "error": "根目录未设置"}
+
+        try:
+            os.makedirs(export_dir, exist_ok=True)
+        except Exception as e:
+            return {"success": False, "error": f"无法创建目标目录: {e}"}
+
+        exported_count = 0
+        failed_count = 0
+        errors = []
+
+        for rel_path in image_paths:
+            try:
+                filename = os.path.basename(rel_path)
+                file_ext = os.path.splitext(filename)[1].lower()
+                
+                # Check if it's a .dat file that needs decryption
+                if file_ext == '.dat' or self._is_valid_sns_filename(filename):
+                    # Decrypt the .dat file
+                    b64 = self.decrypt_dat(rel_path)
+                    if not b64:
+                        errors.append(f"{rel_path}: 解密失败")
+                        failed_count += 1
+                        continue
+                    
+                    data = base64.b64decode(b64)
+                    
+                    # Determine file extension based on magic bytes
+                    if data.startswith(b'\xff\xd8\xff'):
+                        ext = '.jpg'
+                    elif data.startswith(b'\x89PNG\r\n\x1a\n'):
+                        ext = '.png'
+                    elif data.startswith(b'GIF8'):
+                        ext = '.gif'
+                    else:
+                        ext = '.jpg'  # Default to jpg
+                    
+                    # Get filename without extension and add new extension
+                    outname = os.path.splitext(filename)[0] + ext
+                    outpath = os.path.join(export_dir, outname)
+                    
+                    with open(outpath, "wb") as f:
+                        f.write(data)
+                    
+                    exported_count += 1
+                else:
+                    # For non-.dat files (already image files), just copy them
+                    import shutil
+                    full_path = info.weixin_dir / rel_path
+                    if not full_path.exists():
+                        errors.append(f"{rel_path}: 文件不存在")
+                        failed_count += 1
+                        continue
+                    
+                    outpath = os.path.join(export_dir, filename)
+                    shutil.copy2(full_path, outpath)
+                    exported_count += 1
+                
+            except Exception as e:
+                errors.append(f"{rel_path}: {e}")
+                failed_count += 1
+
+        message = f"导出完成！\n成功: {exported_count} 个文件\n失败: {failed_count} 个文件"
+        if errors:
+            message += f"\n\n错误详情:\n" + "\n".join(errors[:10])  # Show first 10 errors
+            if len(errors) > 10:
+                message += f"\n... 还有 {len(errors) - 10} 个错误"
+        
+        return {"success": True, "message": message, "count": exported_count, "failed": failed_count, "errors": errors}
+
+    def update_window_title(self, title: str):
+        """
+        更新宿主窗口标题（用于 PyWebview）。
+        """
+        try:
+            # window 是在模块末尾创建的全局变量
+            if 'window' in globals() and window:
+                try:
+                    window.set_title(title)  # type: ignore
+                except Exception:
+                    # 某些运行时可能没有该方法
+                    pass
+            # 也返回信息供 JS 端检查
+            return {"success": True}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
 
 
 def get_resource_path(relative_path):

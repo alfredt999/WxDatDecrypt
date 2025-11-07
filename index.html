@@ -11,6 +11,76 @@
 
     <!-- 2. 链接到外部样式表 -->
     <link rel="stylesheet" href="style.css">
+    <style>
+        /* Modal for full-size image */
+        #image-modal {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0,0,0,0.8);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 9999;
+            overflow: auto;
+            padding: 20px;
+        }
+
+        #image-modal .modal-content {
+            background: transparent;
+            border-radius: 6px;
+            max-width: none;
+            max-height: none;
+            box-shadow: none;
+        }
+
+        #image-modal canvas {
+            display: block;
+            image-rendering: auto;
+            max-width: none;
+            max-height: none;
+        }
+
+        #image-modal .modal-caption {
+            color: #fff;
+            margin-top: 8px;
+            text-align: center;
+            word-break: break-all;
+        }
+
+        #image-modal .close-btn {
+            position: fixed;
+            top: 12px;
+            right: 16px;
+            background: rgba(0,0,0,0.5);
+            color: #fff;
+            border: none;
+            padding: 8px 10px;
+            cursor: pointer;
+            font-size: 14px;
+            border-radius: 4px;
+            z-index: 10000;
+        }
+        /* toolbar inside modal */
+        #image-modal .modal-toolbar {
+            position: fixed;
+            top: 12px;
+            left: 16px;
+            display: flex;
+            gap: 8px;
+            z-index: 10000;
+        }
+        #image-modal .modal-toolbar button {
+            background: rgba(0,0,0,0.5);
+            color: #fff;
+            border: none;
+            padding: 6px 8px;
+            cursor: pointer;
+            border-radius: 4px;
+        }
+    </style>
 </head>
 
 <body>
@@ -454,6 +524,13 @@
                         </defs>
                     </svg>
                 </fluent-button>
+                <fluent-button id="export-btn" appearance="transparent" title="导出所有图片">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                        <polyline points="7,10 12,15 17,10"/>
+                        <line x1="12" y1="15" x2="12" y2="3"/>
+                    </svg>
+                </fluent-button>
             </nav>
 
             <!-- 主内容区 -->
@@ -508,6 +585,7 @@
             const homeBtn = document.getElementById('home-btn');
             const folderBtn = document.getElementById('folder-btn');
             const selectFolderBtn = document.getElementById('select-folder-btn');
+            const exportBtn = document.getElementById('export-btn');
             const homeView = document.getElementById('home-view');
             const folderView = document.getElementById('folder-view');
             const dirTree = document.getElementById('dir-tree');
@@ -516,13 +594,33 @@
             const scrollContainer = document.querySelector('.gallery-scroll-container');
             const currentFolderInfo = document.getElementById('current-folder-info');
 
+            // Initialize export button as disabled
+            if (exportBtn) {
+                exportBtn.disabled = true;
+                exportBtn.appearance = 'stealth';
+            }
+
+            // modal elements
+            const modal = document.getElementById('image-modal');
+            const modalTitle = document.getElementById('modal-title');
+            const modalPrev = document.getElementById('modal-prev');
+            const modalNext = document.getElementById('modal-next');
+            const modalZoomIn = document.getElementById('modal-zoom-in');
+            const modalZoomOut = document.getElementById('modal-zoom-out');
+            const modalClose = document.getElementById('modal-close');
+            const modalCanvas = document.getElementById('modal-canvas');
+
             // --- 状态管理 ---
             let currentRootDir = null;
+            let currentSelectedFolder = null; // Track the currently selected folder in the tree
             let allImagePaths = [];
             let currentImageIndex = 0;
             let columnElements = [];
             let sentinelObserver = null;
             let isLoading = false; // 关键的加载锁
+            let modalOpen = false;
+            let modalImage = null;
+            let modalCurrentScale = 1;
             const BATCH_SIZE = 10; // 每次滚动加载的图片数量
 
             // --- 辅助函数：防抖 ---
@@ -544,7 +642,14 @@
             }
 
             // --- 事件监听 ---
-            homeBtn.addEventListener('click', () => switchView('home'));
+            homeBtn.addEventListener('click', () => {
+                switchView('home');
+                // Disable export button when switching to home view
+                if (exportBtn) {
+                    exportBtn.disabled = true;
+                    exportBtn.appearance = 'stealth';
+                }
+            });
             folderBtn.addEventListener('click', () => {
                 if (currentRootDir) switchView('folder');
                 else alert("请先在主页选择一个根目录！");
@@ -558,10 +663,62 @@
                     switchView('folder');
                 }
             });
+
+            if (exportBtn) {
+                exportBtn.addEventListener('click', async () => {
+                    if (!currentRootDir) {
+                        alert('请先选择根目录。');
+                        return;
+                    }
+
+                    // Check if a folder is selected
+                    if (!currentSelectedFolder) {
+                        alert('请先在左侧选择一个文件夹。');
+                        return;
+                    }
+
+                    // Check if selected folder is under root directory
+                    if (!currentSelectedFolder.startsWith(currentRootDir)) {
+                        alert(`选择的文件夹不在根目录下！\n\n根目录: ${currentRootDir}\n选择的文件夹: ${currentSelectedFolder}\n\n请重新选择根目录，确保它包含您要导出的文件夹。`);
+                        return;
+                    }
+
+                    // Get images from the selected folder
+                    const allImages = await window.pywebview.api.get_images_in_folder(currentSelectedFolder);
+                    if (!allImages || allImages.length === 0) {
+                        alert('选中的文件夹中没有找到可导出的图片文件。');
+                        return;
+                    }
+
+                    // Prompt for export directory (destination only)
+                    const exportDir = await window.pywebview.api.open_export_dialog();
+                    if (!exportDir || !exportDir.success) {
+                        return; // User cancelled
+                    }
+
+                    // Show progress
+                    const progressText = `正在导出 ${allImages.length} 个图片到 ${exportDir.path}...`;
+                    alert(progressText); // Simple progress indicator
+
+                    try {
+                        const result = await window.pywebview.api.export_all_images(exportDir.path, allImages);
+                        if (result.success) {
+                            alert(result.message);
+                        } else {
+                            alert(`导出失败: ${result.error}`);
+                        }
+                    } catch (error) {
+                        console.error('Export error:', error);
+                        alert('导出过程中发生错误，请查看控制台日志。');
+                    }
+                });
+            }
+
             window.addEventListener('resize', debounce(() => {
                 if (allImagePaths.length > 0 && folderView.classList.contains('hidden') === false) {
                     rebuildLayout();
                 }
+                if (modalOpen && modalImage) fitImageToViewport(modalImage);
             }, 250));
 
             // --- 目录树逻辑 (无大改) ---
@@ -573,6 +730,7 @@
                     dirTree.appendChild(treeItem);
                     treeItem.expanded = true;
                     treeItem.selected = true;
+                    expandAllTree(dirTree);
                     selectTreeNode(treeItem);
                 }
             }
@@ -590,6 +748,12 @@
                 }
                 return treeItem;
             }
+            // Expand all tree items under a root element
+            function expandAllTree(rootEl) {
+                if (!rootEl) return;
+                const items = rootEl.querySelectorAll('fluent-tree-item');
+                items.forEach(it => it.expanded = true);
+            }
             dirTree.addEventListener('click', e => {
                 const clickedItem = e.target.closest('fluent-tree-item');
                 if (clickedItem) selectTreeNode(clickedItem);
@@ -605,6 +769,12 @@
                 nodeElement.selected = true;
                 const folderPath = nodeElement.dataset.path;
                 if (folderPath) {
+                    currentSelectedFolder = folderPath; // Track selected folder
+                    // Enable export button when a folder is selected
+                    if (exportBtn) {
+                        exportBtn.disabled = false;
+                        exportBtn.appearance = 'transparent';
+                    }
                     updateBreadcrumb(folderPath);
                     startImageLoading(folderPath);
                 }
@@ -753,6 +923,7 @@
                 const card = document.createElement('fluent-card');
                 card.className = 'image-card is-loading';
                 const img = document.createElement('img');
+                img.dataset.relPath = relPath;
                 const caption = document.createElement('div');
                 caption.className = 'caption';
                 caption.textContent = relPath.split(/[\\/]/).pop();
@@ -767,6 +938,9 @@
                 column.appendChild(card);
 
                 fetchAndSetImage(relPath, img);
+
+                // show zoom cursor
+                img.style.cursor = 'zoom-in';
             }
 
             // 6. 放置哨兵
@@ -818,10 +992,149 @@
                 }
             }
 
+            // --- Modal functionality ---
+            function showModal() {
+                console.log('showModal called, modal element:', modal);
+                modal.style.display = 'flex';
+                modal.setAttribute('aria-hidden', 'false');
+                modalOpen = true;
+                console.log('modalOpen set to:', modalOpen);
+            }
+
+            function hideModal() {
+                modal.style.display = 'none';
+                modal.setAttribute('aria-hidden', 'true');
+                modalOpen = false;
+                try { window.pywebview.api.update_window_title('微信图片查看器'); } catch (e) {}
+                document.title = '微信图片查看器';
+            }
+
+            async function openImagePopup(index) {
+                console.log('openImagePopup called with index:', index);
+                if (!allImagePaths || index < 0 || index >= allImagePaths.length) return;
+                currentImageIndex = index;
+                const relPath = allImagePaths[index];
+                const filename = relPath.split(/[\\\/]/).pop();
+                console.log('Opening image:', filename, 'relPath:', relPath);
+                modalTitle.textContent = filename;
+                try { await window.pywebview.api.update_window_title(filename + ' - 微信图片查看器'); } catch (e) {}
+                document.title = filename + ' - 微信图片查看器';
+                try {
+                    console.log('Calling decrypt_dat...');
+                    const base64 = await window.pywebview.api.decrypt_dat(relPath);
+                    console.log('decrypt_dat returned, base64 length:', base64 ? base64.length : 0);
+                    if (!base64) throw new Error('解密返回空数据');
+                    const bytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
+                    const blob = new Blob([bytes], { type: 'image/jpeg' });
+                    const url = URL.createObjectURL(blob);
+                    console.log('Created blob URL:', url);
+                    const img = new Image();
+                    img.onload = () => { 
+                        console.log('Image loaded successfully, dimensions:', img.naturalWidth, 'x', img.naturalHeight);
+                        modalImage = img; 
+                        modalCurrentScale = 1; 
+                        fitImageToViewport(img); 
+                        URL.revokeObjectURL(url); 
+                    };
+                    img.onerror = (e) => console.error('modal image load error', e);
+                    img.src = url;
+                    console.log('Calling showModal...');
+                    showModal();
+                } catch (e) { console.error('openImagePopup error', e); alert('无法打开图片: ' + e); }
+            }
+
+            function fitImageToViewport(img) {
+                const maxViewportWidth = window.innerWidth - 120;
+                const maxViewportHeight = window.innerHeight - 120;
+                const scaleW = maxViewportWidth / img.naturalWidth;
+                const scaleH = maxViewportHeight / img.naturalHeight;
+                modalCurrentScale = Math.min(1, Math.max(0.1, Math.min(scaleW, scaleH)));
+                renderImageToCanvas(img, modalCurrentScale);
+            }
+
+            function renderImageToCanvas(img, scale) {
+                const ctx = modalCanvas.getContext('2d');
+                const maxViewportWidth = window.innerWidth - 120;
+                const maxViewportHeight = window.innerHeight - 120;
+                let displayW, displayH;
+                if (scale === 1) {
+                    displayW = Math.min(img.naturalWidth, maxViewportWidth);
+                    displayH = Math.min(img.naturalHeight, maxViewportHeight);
+                    const rW = displayW / img.naturalWidth;
+                    const rH = displayH / img.naturalHeight;
+                    const r = Math.min(rW, rH);
+                    displayW = Math.round(img.naturalWidth * r);
+                    displayH = Math.round(img.naturalHeight * r);
+                } else {
+                    displayW = Math.round(img.naturalWidth * scale);
+                    displayH = Math.round(img.naturalHeight * scale);
+                    const rW = maxViewportWidth / displayW;
+                    const rH = maxViewportHeight / displayH;
+                    const r = Math.min(1, Math.min(rW, rH));
+                    displayW = Math.round(displayW * r);
+                    displayH = Math.round(displayH * r);
+                }
+                modalCanvas.width = displayW;
+                modalCanvas.height = displayH;
+                modalCanvas.style.width = displayW + 'px';
+                modalCanvas.style.height = displayH + 'px';
+                ctx.clearRect(0, 0, modalCanvas.width, modalCanvas.height);
+                ctx.imageSmoothingEnabled = true;
+                ctx.drawImage(img, 0, 0, img.naturalWidth, img.naturalHeight, 0, 0, modalCanvas.width, modalCanvas.height);
+            }
+
+            modalPrev.addEventListener('click', () => { if (!allImagePaths || allImagePaths.length === 0) return; let idx = currentImageIndex - 1; if (idx < 0) idx = allImagePaths.length - 1; openImagePopup(idx); });
+            modalNext.addEventListener('click', () => { if (!allImagePaths || allImagePaths.length === 0) return; let idx = currentImageIndex + 1; if (idx >= allImagePaths.length) idx = 0; openImagePopup(idx); });
+            modalClose.addEventListener('click', hideModal);
+            modalZoomIn.addEventListener('click', () => { if (!modalImage) return; modalCurrentScale = Math.min(5, modalCurrentScale * 1.2); renderImageToCanvas(modalImage, modalCurrentScale); });
+            modalZoomOut.addEventListener('click', () => { if (!modalImage) return; modalCurrentScale = Math.max(0.1, modalCurrentScale / 1.2); renderImageToCanvas(modalImage, modalCurrentScale); });
+
+            document.addEventListener('keydown', (e) => {
+                if (!modalOpen) return;
+                if (e.key === 'Escape') hideModal();
+                if (e.key === 'ArrowLeft') modalPrev.click();
+                if (e.key === 'ArrowRight') modalNext.click();
+            });
+
+            // delegated click handler for thumbnails
+            imageGallery.addEventListener('click', (e) => {
+                console.log('Gallery clicked, target:', e.target);
+                const img = e.target.closest && e.target.closest('img');
+                console.log('Found img element:', img);
+                if (!img) return;
+                const rel = img.dataset.relPath;
+                console.log('Image relPath:', rel);
+                if (rel) {
+                    console.debug('thumbnail clicked', rel);
+                    const idx = allImagePaths.indexOf(rel);
+                    console.log('Image index:', idx, 'Total images:', allImagePaths ? allImagePaths.length : 0);
+                    if (idx >= 0) {
+                        console.log('Opening image popup for index:', idx);
+                        openImagePopup(idx);
+                    }
+                }
+            });
+
             // --- 初始化 ---
             switchView('home');
         });
     </script>
+
+    <!-- Modal for full-size image viewing -->
+    <div id="image-modal" role="dialog" aria-modal="true">
+        <div class="modal-toolbar">
+            <button id="modal-prev">上一张</button>
+            <button id="modal-next">下一张</button>
+            <span style="width:10px"></span>
+            <button id="modal-zoom-in">放大</button>
+            <button id="modal-zoom-out">缩小</button>
+        </div>
+        <button id="modal-close" class="close-btn" aria-label="关闭">关闭</button>
+        <div class="modal-content">
+            <canvas id="modal-canvas" style="background:#000; display:block;"></canvas>
+            <div id="modal-title" class="modal-caption"></div>
+        </div>
+    </div>
 </body>
 
 </html>
